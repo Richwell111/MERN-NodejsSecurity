@@ -1,6 +1,7 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
+import bcrypt from "bcrypt";
 
 const router = express.Router();
 
@@ -15,13 +16,15 @@ router.post("/register", async (req, res) => {
       return res.status(400).json({ message: "User already exists" });
     }
 
+    const hashPassword = await bcrypt.hash(password, 10);
+
     const user = await User.create({
       name,
       email,
-      password,
+      password: hashPassword,
     });
 
-    res.status(201).json({
+   res.status(201).json({
       message: "User created",
       user: {
         id: user._id,
@@ -43,13 +46,19 @@ router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // INTENTIONALLY INSECURE:
-    // Plain query with raw email and raw password comparison.
-    const user = await User.findOne({ email, password });
+   
+    // only check with email which is correct
+    const user = await User.findOne({ email });
 
     if (!user) {
-      return res.status(401).json({ message: "Invalid credentials" });
+      return res.status(401).json({ message: "Invalid email or password" });
     }
+     const checkPassword = await bcrypt.compare(password, user.password);
+
+     if(!checkPassword){
+      return res.status(401).json({ message: "Invalid email or password" });
+     }
+
 
     const token = jwt.sign(
       {
