@@ -2,6 +2,7 @@ import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
 import dotenv from "dotenv";
+import cookieParser from "cookie-parser";
 import authRoutes from "./routes/auth.js";
 
 dotenv.config();
@@ -28,6 +29,7 @@ app.use(
 // INTENTIONALLY SIMPLE / INSECURE:
 // open JSON parsing with no limits yet
 app.use(express.json());
+app.use(cookieParser());
 
 app.get("/api/health", (_req, res) => {
   res.json({
