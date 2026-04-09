@@ -8,7 +8,7 @@ import {
   createAccessToken,
   createCsrfToken,
   createRefreshToken,
-} from "./jwt";
+} from "./jwt.js";
 
 const ACCESS_COOKIE = "access_token";
 const REFRESH_COOKIE = "refresh_token";

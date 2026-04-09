@@ -1,4 +1,10 @@
 node_modules
-dist
-.env
 npm-debug.log
+.env
+.git
+.gitignore
+README.md
+dist
+Dockerfile
+docker-compose.yml
+.dockerignore

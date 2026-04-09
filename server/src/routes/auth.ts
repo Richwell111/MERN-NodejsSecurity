@@ -1,37 +1,41 @@
 import express from "express";
-import asyncHandler from "express-async-handler";
-import bcrypt from "bcrypt";
-import { z } from "zod";
+import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
+import bcrypt from "bcrypt";
+import {
+  clearAuthCookies,
+  requireCsrf,
+  setAuthCookies,
+} from "../utils/cookie.js";
+import { requireAccessAuth, requiredRole } from "../middleware/auth.js";
+import { AuthenticatedRequest, AuthTokenPayload } from "../utils/types.js";
+import {
+  clearFailedLoginAttempts,
+  isAccLocked,
+  registerFailedLoginAttemp,
+  validateBody,
+} from "../utils/helpers.js";
+import {
+  listUsersQuerySchema,
+  loginSchema,
+  registerSchema,
+} from "../utils/schema.js";
 
 const router = express.Router();
 
-// Validation Schemas
-const registerSchema = z.object({
-  name: z.string().min(2, "Name must be at least 2 characters"),
-  email: z.string().email("Invalid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
-});
+const EXTRACT_SAFE_USER_SELECT_OPTIONS = "-password";
 
-const loginSchema = z.object({
-  email: z.string().email("Invalid email address"),
-  password: z.string(),
-});
-
-// POST /api/auth/register
-router.post(
-  "/register",
-  asyncHandler(async (req, res) => {
-    const validatedData = registerSchema.parse(req.body);
-    const { name, email, password } = validatedData;
+router.post("/register", validateBody(registerSchema), async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
 
     const existingUser = await User.findOne({ email });
+
     if (existingUser) {
-      res.status(400);
-      throw new Error("User already exists");
+      return res.status(400).json({ message: "User already exists" });
     }
 
-    const hashPassword = await bcrypt.hash(password, 12);
+    const hashPassword = await bcrypt.hash(password, 10);
 
     const user = await User.create({
       name,
@@ -39,10 +43,8 @@ router.post(
       password: hashPassword,
     });
 
-  
-
     res.status(201).json({
-      message: "Registration successful",
+      message: "User created",
       user: {
         id: user._id,
         name: user.name,
@@ -50,31 +52,54 @@ router.post(
         role: user.role,
       },
     });
-  }),
-);
+  } catch (error) {
+    res.status(500).json({
+      message: "Register failed",
+      error,
+    });
+  }
+});
 
-// POST /api/auth/login
-router.post(
-  "/login",
-  asyncHandler(async (req, res) => {
-    const validatedData = loginSchema.parse(req.body);
-    const { email, password } = validatedData;
+router.post("/login", validateBody(loginSchema), async (req, res) => {
+  try {
+    const { email, password } = req.body;
 
+    // only check with email which is correct
     const user = await User.findOne({ email });
+
     if (!user) {
-      res.status(401);
-      throw new Error("Invalid email or password");
+      return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      res.status(401);
-      throw new Error("Invalid email or password");
+    // check if user acc locked
+
+    if (isAccLocked(user)) {
+      return res.status(429).json({
+        message: "Too many login attempts. Please try again later",
+      });
     }
 
-    
+    const checkPassword = await bcrypt.compare(password, user.password);
+
+    if (!checkPassword) {
+      await registerFailedLoginAttemp(user);
+
+      if (isAccLocked(user)) {
+        return res.status(429).json({
+          message: "Too many login attempts. Please try again later",
+        });
+      }
+
+      return res.status(401).json({
+        message: "Invalid email or password",
+      });
+    }
+
+    await clearFailedLoginAttempts(user);
+
+    setAuthCookies(res, String(user._id), user.role);
     res.json({
-      message: "Login successful",
+      message: "Login success",
       user: {
         id: user._id,
         name: user.name,
@@ -82,26 +107,115 @@ router.post(
         role: user.role,
       },
     });
-  }),
-);
+  } catch (error) {
+    res.status(500).json({
+      message: "Login failed",
+      error,
+    });
+  }
+});
 
-// POST /api/auth/logout
-router.post(
-  "/logout",
-  asyncHandler(async (req, res) => {
-   
-    res.json({ message: "Logged out successfully" });
-  }),
-);
+router.get("/me", requireAccessAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = await User.findById(req.authUser?.userId).select(
+      EXTRACT_SAFE_USER_SELECT_OPTIONS,
+    );
 
-// GET /api/auth/me
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    return res.json(user);
+  } catch (error) {
+    res.status(401).json({
+      message: "Unauthorized",
+      error,
+    });
+  }
+});
+
+router.post("/refresh", requireCsrf, async (req, res) => {
+  try {
+    const refreshToken = req.cookies?.["refresh_token"];
+
+    if (!refreshToken) {
+      return res.json(401).json({
+        message: "No refresh token",
+      });
+    }
+
+    const decodedUserInfo = jwt.verify(
+      refreshToken,
+      process.env.REFRESH_TOKEN_SECRET!,
+    ) as AuthTokenPayload;
+
+    if (decodedUserInfo.type !== "refresh") {
+      return res.json(401).json({
+        message: "Invalied refresh token type provided",
+      });
+    }
+
+    setAuthCookies(res, decodedUserInfo.userId, decodedUserInfo.role);
+
+    return res.json({
+      message: "Token refreshed",
+    });
+  } catch {
+    return res.json(401).json({
+      message: "Refresh failed",
+    });
+  }
+});
+
+router.post("/logout", requireCsrf, (_req, res) => {
+  clearAuthCookies(res);
+
+  return res.json({
+    message: "logout success!!!",
+  });
+});
+
 router.get(
-  "/me",
-  asyncHandler(async (req, res) => {
-    // Note: In a real app, you'd use an authMiddleware to populate req.user
-    // For now, we'll keep it simple or implement the middleware next.
-    res.status(501).json({ message: "Use authMiddleware for /me" });
-  }),
+  "/users",
+  requireAccessAuth,
+  requiredRole("admin"),
+  async (req, res) => {
+    try {
+      const parsedQuery = listUsersQuerySchema.safeParse(req.query);
+
+      if (!parsedQuery.success) {
+        return res.status(400).json({
+          message: "Invalid query filters",
+        });
+      }
+
+      const filters: Record<string, string> = {};
+
+      if (parsedQuery.data.role) {
+        filters.role = parsedQuery.data.role;
+      }
+
+      if (parsedQuery.data.name) {
+        filters.name = parsedQuery.data.name;
+      }
+
+      if (parsedQuery.data.email) {
+        filters.email = parsedQuery.data.email;
+      }
+
+      const extractUsersList = await User.find(filters).select(
+        EXTRACT_SAFE_USER_SELECT_OPTIONS,
+      );
+
+      return res.json({ users: extractUsersList });
+    } catch {
+      res.status(500).json({
+        message: "Failed to fetch users list",
+      });
+    }
+  },
 );
 
 export default router;
